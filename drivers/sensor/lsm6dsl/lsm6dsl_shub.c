@@ -125,7 +125,7 @@ static const uint8_t lis3mdl_odr_bits[] = {
 		LIS3MDL_ODR_BITS(1, 0, 1), /* 560 Hz */
 		LIS3MDL_ODR_BITS(0, 0, 1)  /* 1000 Hz */
 };
-#define LIS3MDL_ODR lis3mdl_odr_bits[4]
+#define LIS3MDL_ODR lis3mdl_odr_bits[11]
 
 /* REG_CTRL3 */
 #define LIS3MDL_MD_CONTINUOUS          0x00
