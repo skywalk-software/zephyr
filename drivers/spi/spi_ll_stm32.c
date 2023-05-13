@@ -639,6 +639,8 @@ static int transceive(const struct device *dev,
 
 	LL_SPI_Enable(spi);
 
+	k_busy_wait(1);
+
 	/* This is turned off in spi_stm32_complete(). */
 	spi_stm32_cs_control(dev, true);
 
