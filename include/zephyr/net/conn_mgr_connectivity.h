@@ -15,6 +15,7 @@
 
 #include <zephyr/device.h>
 #include <zephyr/net/net_if.h>
+#include <zephyr/sys/iterable_sections.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -34,7 +35,7 @@ extern "C" {
 #define _NET_MGMT_CONN_LAYER			NET_MGMT_LAYER(NET_MGMT_LAYER_L2)
 #define _NET_MGMT_CONN_CODE			NET_MGMT_LAYER_CODE(0x207)
 #define _NET_MGMT_CONN_BASE			(_NET_MGMT_CONN_LAYER | _NET_MGMT_CONN_CODE)
-#define _NET_MGMT_CONN_IF_EVENT			(NET_MGMT_IFACE_BIT | _NET_MGMT_CONN_EVENT)
+#define _NET_MGMT_CONN_IF_EVENT			(NET_MGMT_IFACE_BIT | _NET_MGMT_CONN_BASE)
 
 enum net_event_ethernet_cmd {
 	NET_EVENT_CONN_CMD_IF_TIMEOUT = 1,
@@ -259,6 +260,8 @@ struct conn_mgr_conn_binding {
  * If the provided iface has been bound to a connectivity implementation, initiate
  * network connect/association.
  *
+ * Automatically takes the iface admin-up (by calling net_if_up) if it isn't already.
+ *
  * Non-Blocking.
  *
  * @param iface Pointer to network interface
@@ -274,6 +277,8 @@ int conn_mgr_if_connect(struct net_if *iface);
  *
  * If the provided iface has been bound to a connectivity implementation, disconnect/dissassociate
  * it from the network, and cancel any pending attempts to connect/associate.
+ *
+ * Does nothing if the iface is currently admin-down.
  *
  * @param iface Pointer to network interface
  *

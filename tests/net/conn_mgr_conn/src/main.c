@@ -15,25 +15,9 @@
 #include <zephyr/ztest.h>
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/conn_mgr_connectivity.h>
+#include "conn_mgr_private.h"
 #include "test_conn_impl.h"
 #include "test_ifaces.h"
-
-
-/* This is a duplicate of conn_mgr_if_get_binding in net_if.c,
- * which is currently not exposed.
- */
-static inline struct conn_mgr_conn_binding *conn_mgr_if_get_binding(struct net_if *iface)
-{
-	STRUCT_SECTION_FOREACH(conn_mgr_conn_binding, binding) {
-		if (iface == binding->iface) {
-			if (binding->impl->api) {
-				return binding;
-			}
-			return NULL;
-		}
-	}
-	return NULL;
-}
 
 static inline struct test_conn_data *conn_mgr_if_get_data(struct net_if *iface)
 {
@@ -67,9 +51,48 @@ static void reset_test_iface(struct net_if *iface)
 		iface_data->call_cnt_b = 0;
 		iface_data->conn_bal = 0;
 		iface_data->api_err = 0;
+		iface_data->fatal_error = 0;
+		iface_data->timeout = false;
 		memset(iface_data->data_x, 0, sizeof(iface_data->data_x));
 		memset(iface_data->data_y, 0, sizeof(iface_data->data_y));
 	}
+}
+
+
+/* NET_MGMT event tracking */
+
+static K_MUTEX_DEFINE(event_mutex);
+static struct event_stats {
+	int timeout_count;
+	int fatal_error_count;
+	int event_count;
+	int event_info;
+	struct net_if *event_iface;
+} test_event_stats;
+
+struct net_mgmt_event_callback conn_mgr_conn_callback;
+
+static void conn_mgr_conn_handler(struct net_mgmt_event_callback *cb,
+				  uint32_t event, struct net_if *iface)
+{
+	k_mutex_lock(&event_mutex, K_FOREVER);
+
+	if (event == NET_EVENT_CONN_IF_TIMEOUT) {
+		test_event_stats.timeout_count += 1;
+	} else if (event == NET_EVENT_CONN_IF_FATAL_ERROR) {
+		test_event_stats.fatal_error_count += 1;
+	}
+
+	test_event_stats.event_count += 1;
+	test_event_stats.event_iface = iface;
+
+	if (cb->info) {
+		test_event_stats.event_info = *((int *)cb->info);
+	} else {
+		test_event_stats.event_info = 0;
+	}
+
+	k_mutex_unlock(&event_mutex);
 }
 
 static void conn_mgr_conn_before(void *data)
@@ -81,6 +104,24 @@ static void conn_mgr_conn_before(void *data)
 	reset_test_iface(ifni);
 	reset_test_iface(ifnone);
 	reset_test_iface(ifnull);
+
+	k_mutex_lock(&event_mutex, K_FOREVER);
+
+	test_event_stats.event_count = 0;
+	test_event_stats.timeout_count = 0;
+	test_event_stats.fatal_error_count = 0;
+	test_event_stats.event_iface = NULL;
+	test_event_stats.event_info = 0;
+
+	k_mutex_unlock(&event_mutex);
+}
+
+static void *conn_mgr_conn_setup(void)
+{
+	net_mgmt_init_event_callback(&conn_mgr_conn_callback, conn_mgr_conn_handler,
+				     NET_EVENT_CONN_IF_TIMEOUT | NET_EVENT_CONN_IF_FATAL_ERROR);
+	net_mgmt_add_event_callback(&conn_mgr_conn_callback);
+	return NULL;
 }
 
 /* This suite uses k_sleep(K_MSEC(1)) to allow Zephyr to perform event propagation.
@@ -351,24 +392,60 @@ ZTEST(conn_mgr_conn, test_connect_disconnect_double_instant)
 	zassert_equal(ifa1_data->call_cnt_a, 4, "ifa1->disconnect should have been called once.");
 }
 
+/* Verify that calling connect on a down iface automatically takes the iface up. */
+ZTEST(conn_mgr_conn, test_connect_autoup)
+{
+	struct test_conn_data *ifa1_data = conn_mgr_if_get_data(ifa1);
+
+	/* Connect iface */
+	zassert_equal(conn_mgr_if_connect(ifa1), 0, "conn_mgr_if_connect should not fail");
+	k_sleep(K_MSEC(1));
+
+	/* Verify net_if_up was called */
+	zassert_true(net_if_is_admin_up(ifa1), "ifa1 should be admin-up after conn_mgr_if_connect");
+
+	/* Verify that connection succeeds */
+	zassert_true(net_if_is_up(ifa1),	"ifa1 should be oper-up after conn_mgr_if_connect");
+	zassert_equal(ifa1_data->conn_bal, 1,	"ifa1->connect should have been called once.");
+	zassert_equal(ifa1_data->call_cnt_a, 1,	"ifa1->connect should have been called once.");
+}
+
+/* Verify that calling disconnect on a down iface has no effect and raises no error. */
+ZTEST(conn_mgr_conn, test_disconnect_down)
+{
+	struct test_conn_data *ifa1_data = conn_mgr_if_get_data(ifa1);
+
+	/* Disconnect iface */
+	zassert_equal(conn_mgr_if_disconnect(ifa1), 0, "conn_mgr_if_disconnect should not fail.");
+	k_sleep(K_MSEC(1));
+
+	/* Verify iface is still down */
+	zassert_false(net_if_is_admin_up(ifa1), "ifa1 should be still be admin-down.");
+
+	/* Verify that no callbacks were fired */
+	zassert_equal(ifa1_data->conn_bal, 0,	"No callbacks should have been fired.");
+	zassert_equal(ifa1_data->call_cnt_a, 0,	"No callbacks should have been fired.");
+}
+
+/**
+ * Verify that invalid bound ifaces are treated as though they are not bound at all.
+ */
+ZTEST(conn_mgr_conn, test_invalid_ignored)
+{
+	zassert_is_null(conn_mgr_if_get_binding(ifnull));
+	zassert_is_null(conn_mgr_if_get_binding(ifnone));
+	zassert_false(conn_mgr_if_is_bound(ifnull));
+	zassert_false(conn_mgr_if_is_bound(ifnone));
+}
+
 /* Verify that connecting an iface that isn't up, missing an API,
  * or isn't connectivity-bound raises an error.
  */
 ZTEST(conn_mgr_conn, test_connect_invalid)
 {
-	struct test_conn_data *ifa1_data = conn_mgr_if_get_data(ifa1);
-
 	/* Bring ifnull and ifnone up */
 	zassert_equal(net_if_up(ifnull), 0, "net_if_up should succeed for ifnull");
 	zassert_equal(net_if_up(ifnone), 0, "net_if_up should succeed for ifnone");
-
-	/* Attempts to connect ifa1 without bringing it up should fail */
-	zassert_equal(conn_mgr_if_connect(ifa1), -ESHUTDOWN,
-					"conn_mgr_if_connect should give -ENOTSUP for down iface");
-	zassert_equal(ifa1_data->conn_bal, 0,
-					"conn_mgr_if_connect should not affect down iface");
-	zassert_equal(ifa1_data->call_cnt_a, 0,
-					"conn_mgr_if_connect should not affect down iface");
 
 	/* Attempts to connect ifnull should fail, even if it is up */
 	zassert_equal(conn_mgr_if_connect(ifnull), -ENOTSUP,
@@ -384,19 +461,9 @@ ZTEST(conn_mgr_conn, test_connect_invalid)
  */
 ZTEST(conn_mgr_conn, test_disconnect_invalid)
 {
-	struct test_conn_data *ifa1_data = conn_mgr_if_get_data(ifa1);
-
 	/* Bring ifnull and ifnone up */
 	zassert_equal(net_if_up(ifnull), 0, "net_if_up should succeed for ifnull");
 	zassert_equal(net_if_up(ifnone), 0, "net_if_up should succeed for ifnone");
-
-	/* Attempts to disconnect ifa1 without bringing it up should fail */
-	zassert_equal(conn_mgr_if_disconnect(ifa1), -EALREADY,
-				"conn_mgr_if_disconnect should give -ENOTSUP for down iface");
-	zassert_equal(ifa1_data->conn_bal, 0,
-				"conn_mgr_if_disconnect should not affect down iface");
-	zassert_equal(ifa1_data->call_cnt_a, 0,
-				"conn_mgr_if_disconnect should not affect down iface");
 
 	/* Attempts to disconnect ifnull should fail, even if it is up */
 	zassert_equal(conn_mgr_if_disconnect(ifnull), -ENOTSUP,
@@ -440,6 +507,73 @@ ZTEST(conn_mgr_conn, test_disconnect_fail)
 	zassert_equal(conn_mgr_if_disconnect(ifa1), -EDOM,
 				"conn_mgr_if_disconnect should give -EDOM");
 }
+
+/* Verify that the NET_EVENT_CONN_IF_TIMEOUT event works as expected. */
+ZTEST(conn_mgr_conn, test_connect_timeout)
+{
+	struct event_stats stats;
+	struct test_conn_data *ifa1_data = conn_mgr_if_get_data(ifa1);
+
+	/* instruct ifa1 to timeout on connect */
+	ifa1_data->timeout = true;
+
+	/* Take up and attempt to connect iface */
+	zassert_equal(net_if_up(ifa1), 0,		"net_if_up should succeed");
+
+	zassert_equal(conn_mgr_if_connect(ifa1), 0,	"conn_mgr_if_connect should succeed");
+
+	/* Confirm iface is not immediately connected */
+	zassert_false(net_if_is_up(ifa1), "ifa1 should not be up if instructed to time out");
+
+	/* Ensure timeout event is fired */
+	k_sleep(K_SECONDS(SIMULATED_EVENT_DELAY_SECONDS + 1));
+
+	k_mutex_lock(&event_mutex, K_FOREVER);
+	stats = test_event_stats;
+	k_mutex_unlock(&event_mutex);
+
+	zassert_equal(stats.timeout_count, 1,
+		"NET_EVENT_CONN_IF_TIMEOUT should have been fired");
+	zassert_equal(stats.event_count, 1,
+		"only NET_EVENT_CONN_IF_TIMEOUT should have been fired");
+	zassert_equal(stats.event_iface, ifa1,
+		"Timeout event should be raised on ifa1");
+}
+
+/* Verify that the NET_EVENT_CONN_IF_FATAL_ERROR event works as expected. */
+ZTEST(conn_mgr_conn, test_connect_fatal_error)
+{
+	struct event_stats stats;
+	struct test_conn_data *ifa1_data = conn_mgr_if_get_data(ifa1);
+
+	/* instruct ifa1 to have fatal error on connect. */
+	ifa1_data->fatal_error = -EADDRINUSE;
+
+	/* Take up and attempt to connect iface */
+	zassert_equal(net_if_up(ifa1), 0,		"net_if_up should succeed");
+	zassert_equal(conn_mgr_if_connect(ifa1), 0,	"conn_mgr_if_connect should succeed");
+
+	/* Confirm iface is not immediately connected */
+	zassert_false(net_if_is_up(ifa1), "ifa1 should not be up if instructed to time out");
+
+	/* Ensure fatal_error event is fired */
+	k_sleep(K_SECONDS(SIMULATED_EVENT_DELAY_SECONDS + 1));
+
+	k_mutex_lock(&event_mutex, K_FOREVER);
+	stats = test_event_stats;
+	k_mutex_unlock(&event_mutex);
+
+	zassert_equal(stats.fatal_error_count, 1,
+		"NET_EVENT_CONN_IF_FATAL_ERROR should have been fired");
+	zassert_equal(stats.event_count, 1,
+		"only NET_EVENT_CONN_IF_FATAL_ERROR should have been fired");
+	zassert_equal(stats.event_iface, ifa1,
+		"Fatal error event should be raised on ifa1");
+	zassert_equal(stats.event_info, -EADDRINUSE,
+		"Fatal error info should be -EADDRINUSE");
+}
+
+
 
 /* Verify that conn_mgr_if_is_bound gives correct results */
 ZTEST(conn_mgr_conn, test_supports_connectivity)
@@ -699,4 +833,4 @@ ZTEST(conn_mgr_conn, test_timeout_invalid)
 		"Getting timeout should yield CONN_MGR_IF_NO_TIMEOUT for ifnone");
 }
 
-ZTEST_SUITE(conn_mgr_conn, NULL, NULL, conn_mgr_conn_before, NULL, NULL);
+ZTEST_SUITE(conn_mgr_conn, NULL, conn_mgr_conn_setup, conn_mgr_conn_before, NULL, NULL);

@@ -11,6 +11,7 @@
 #include <soc.h>
 #include <zephyr/drivers/ipm.h>
 #include <zephyr/irq.h>
+#include <zephyr/sys/barrier.h>
 #if defined(CONFIG_IPM_IMX_REV2)
 #define DT_DRV_COMPAT nxp_imx_mu_rev2
 #include "fsl_mu.h"
@@ -155,7 +156,7 @@ static void imx_mu_isr(const struct device *dev)
 	 * with errata 838869.
 	 */
 #if (defined __CORTEX_M) && ((__CORTEX_M == 4U) || (__CORTEX_M == 7U))
-	__DSB();
+	barrier_dsync_fence_full();
 #endif
 }
 
@@ -164,7 +165,7 @@ static int imx_mu_ipm_send(const struct device *dev, int wait, uint32_t id,
 {
 	const struct imx_mu_config *config = dev->config;
 	MU_Type *base = MU(config);
-	uint32_t data32[IMX_IPM_DATA_REGS];
+	uint32_t data32[IMX_IPM_DATA_REGS] = {0};
 #if !IS_ENABLED(CONFIG_IPM_IMX_REV2)
 	mu_status_t status;
 #endif
@@ -174,7 +175,7 @@ static int imx_mu_ipm_send(const struct device *dev, int wait, uint32_t id,
 		return -EINVAL;
 	}
 
-	if (size > CONFIG_IPM_IMX_MAX_DATA_SIZE) {
+	if ((size < 0) || (size > CONFIG_IPM_IMX_MAX_DATA_SIZE)) {
 		return -EMSGSIZE;
 	}
 

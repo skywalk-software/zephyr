@@ -5,13 +5,11 @@
  */
 
 #include <stdint.h>
-
-#include <zephyr/toolchain.h>
-
-#include <soc.h>
+#include <stdbool.h>
+#include <stddef.h>
 
 #include <zephyr/sys/byteorder.h>
-#include <zephyr/bluetooth/hci.h>
+#include <zephyr/bluetooth/hci_types.h>
 
 #include "hal/cpu.h"
 #include "hal/ccm.h"
@@ -923,11 +921,11 @@ static void isr_window(void *param)
 	}
 	lll_chan_set(37 + lll->chan);
 
+#if defined(CONFIG_BT_CENTRAL) || defined(CONFIG_BT_CTLR_ADV_EXT)
 #if defined(CONFIG_BT_CENTRAL)
 	bool is_sched_advanced = IS_ENABLED(CONFIG_BT_CTLR_SCHED_ADVANCED) &&
 				 lll->conn && lll->conn_win_offset_us;
 	uint32_t ticks_anchor_prev;
-	uint32_t ticks_at_start;
 
 	if (is_sched_advanced) {
 		/* Get the ticks_anchor when the offset to free time space for
@@ -940,14 +938,17 @@ static void isr_window(void *param)
 	} else {
 		ticks_anchor_prev = 0U;
 	}
+#endif /* CONFIG_BT_CENTRAL */
+
+	uint32_t ticks_at_start;
 
 	ticks_at_start = ticker_ticks_now_get() +
 			 HAL_TICKER_CNTR_CMP_OFFSET_MIN;
 	remainder_us = radio_tmr_start_tick(0, ticks_at_start);
-#else /* !CONFIG_BT_CENTRAL */
+#else /* !CONFIG_BT_CENTRAL && !CONFIG_BT_CTLR_ADV_EXT */
 
 	remainder_us = radio_tmr_start_now(0);
-#endif /* !CONFIG_BT_CENTRAL */
+#endif /* !CONFIG_BT_CENTRAL && !CONFIG_BT_CTLR_ADV_EXT */
 
 	/* capture end of Rx-ed PDU, for initiator to calculate first
 	 * central event.
@@ -1275,6 +1276,7 @@ static inline int isr_rx_pdu(struct lll_scan *lll, struct pdu_adv *pdu_adv_rx,
 	/* Active scanner */
 	} else if (((pdu_adv_rx->type == PDU_ADV_TYPE_ADV_IND) ||
 		    (pdu_adv_rx->type == PDU_ADV_TYPE_SCAN_IND)) &&
+		   (pdu_adv_rx->len >= offsetof(struct pdu_adv_adv_ind, data)) &&
 		   (pdu_adv_rx->len <= sizeof(struct pdu_adv_adv_ind)) &&
 		   lll->type && !lll->state &&
 #if defined(CONFIG_BT_CENTRAL)
@@ -1367,6 +1369,7 @@ static inline int isr_rx_pdu(struct lll_scan *lll, struct pdu_adv *pdu_adv_rx,
 	else if (((((pdu_adv_rx->type == PDU_ADV_TYPE_ADV_IND) ||
 		    (pdu_adv_rx->type == PDU_ADV_TYPE_NONCONN_IND) ||
 		    (pdu_adv_rx->type == PDU_ADV_TYPE_SCAN_IND)) &&
+		   (pdu_adv_rx->len >= offsetof(struct pdu_adv_adv_ind, data)) &&
 		   (pdu_adv_rx->len <= sizeof(struct pdu_adv_adv_ind))) ||
 		  ((pdu_adv_rx->type == PDU_ADV_TYPE_DIRECT_IND) &&
 		   (pdu_adv_rx->len == sizeof(struct pdu_adv_direct_ind)) &&
@@ -1381,6 +1384,7 @@ static inline int isr_rx_pdu(struct lll_scan *lll, struct pdu_adv *pdu_adv_rx,
 						       &dir_report)) ||
 #endif /* CONFIG_BT_CTLR_ADV_EXT */
 		  ((pdu_adv_rx->type == PDU_ADV_TYPE_SCAN_RSP) &&
+		   (pdu_adv_rx->len >= offsetof(struct pdu_adv_scan_rsp, data)) &&
 		   (pdu_adv_rx->len <= sizeof(struct pdu_adv_scan_rsp)) &&
 		   (lll->state != 0U) &&
 		   isr_scan_rsp_adva_matches(pdu_adv_rx))) &&
@@ -1431,6 +1435,7 @@ static inline bool isr_scan_init_check(const struct lll_scan *lll,
 		lll_scan_adva_check(lll, pdu->tx_addr, pdu->adv_ind.addr,
 				    rl_idx)) &&
 		(((pdu->type == PDU_ADV_TYPE_ADV_IND) &&
+		  (pdu->len >= offsetof(struct pdu_adv_adv_ind, data)) &&
 		  (pdu->len <= sizeof(struct pdu_adv_adv_ind))) ||
 		 ((pdu->type == PDU_ADV_TYPE_DIRECT_IND) &&
 		  (pdu->len == sizeof(struct pdu_adv_direct_ind)) &&

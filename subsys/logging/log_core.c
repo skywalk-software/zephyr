@@ -15,6 +15,7 @@
 #include <zephyr/init.h>
 #include <zephyr/sys/__assert.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/sys/iterable_sections.h>
 #include <ctype.h>
 #include <zephyr/logging/log_frontend.h>
 #include <zephyr/syscall_handler.h>
@@ -167,7 +168,7 @@ static void z_log_msg_post_finalize(void)
 				      K_MSEC(CONFIG_LOG_PROCESS_THREAD_SLEEP_MS),
 				      K_NO_WAIT);
 		} else if (CONFIG_LOG_PROCESS_TRIGGER_THRESHOLD &&
-			   cnt == CONFIG_LOG_PROCESS_TRIGGER_THRESHOLD) {
+			   (cnt + 1) == CONFIG_LOG_PROCESS_TRIGGER_THRESHOLD) {
 			k_timer_stop(&log_process_thread_timer);
 			k_sem_give(&log_process_thread_sem);
 		} else {
@@ -595,8 +596,11 @@ static struct log_msg *msg_alloc(struct mpsc_pbuf_buffer *buffer, uint32_t wlen)
 		return NULL;
 	}
 
-	return (struct log_msg *)mpsc_pbuf_alloc(buffer, wlen,
-				K_MSEC(CONFIG_LOG_BLOCK_IN_THREAD_TIMEOUT_MS));
+	return (struct log_msg *)mpsc_pbuf_alloc(
+		buffer, wlen,
+		(CONFIG_LOG_BLOCK_IN_THREAD_TIMEOUT_MS == -1)
+			? K_FOREVER
+			: K_MSEC(CONFIG_LOG_BLOCK_IN_THREAD_TIMEOUT_MS));
 }
 
 struct log_msg *z_log_msg_alloc(uint32_t wlen)
